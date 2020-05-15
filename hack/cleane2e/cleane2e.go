@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,8 +15,16 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/Azure/ARO-RP/pkg/util/azureclient/mgmt/features"
-	"github.com/Azure/ARO-RP/pkg/util/azureclient/mgmt/network"
 	utillog "github.com/Azure/ARO-RP/pkg/util/log"
+
+	"github.com/Azure/ARO-RP/pkg/util/purge"
+
+	mgmtfeatures "github.com/Azure/azure-sdk-for-go/services/resources/mgmt/2019-07-01/features"
+)
+
+const (
+	defaultTTL     = 48
+	defaultKeepTag = "KEEPIT"
 )
 
 func main() {
@@ -28,17 +37,66 @@ func main() {
 }
 
 func run(ctx context.Context, log *logrus.Entry) error {
+
 	subscriptionID := os.Getenv("AZURE_SUBSCRIPTION_ID")
+	tenantID := os.Getenv("AZURE_TENANT_ID")
+
+	ttl, err := time.ParseDuration(os.Getenv("AZURE_PURGE_TTL"))
+	if err != nil {
+		// in case of error the default ttl is always 48 hours
+		ttl = defaultTTL * time.Hour
+		log.Errorf("Cannot convert TTL to int: %s", err)
+	}
+
+	doNotTouchTag := os.Getenv("AZURE_KEEP_TAG")
+	if doNotTouchTag == "" {
+		doNotTouchTag = defaultKeepTag
+	}
 
 	authorizer, err := auth.NewAuthorizerFromEnvironment()
 	if err != nil {
-		return err
+		log.Fatal(err)
 	}
 
-	privatelinkservicescli := network.NewPrivateLinkServicesClient(subscriptionID, authorizer)
-	resourcegroupscli := features.NewResourceGroupsClient(subscriptionID, authorizer)
-	vnetscli := network.NewVirtualNetworksClient(subscriptionID, authorizer)
+	dryRun, err := strconv.ParseBool(os.Getenv("AZURE_PURGE_DRY_RUN"))
+	if err != nil {
+		log.Errorf("Cannot determine dryRun, defaulting to false: %s", err)
+	}
+	if dryRun {
+		log.Info("Dry run!")
+	}
 
+	deleteCheck := func(resourceGroup mgmtfeatures.ResourceGroup) bool {
+		if !strings.HasPrefix(*resourceGroup.Name, "v4-e2e-rg-") &&
+			!strings.HasPrefix(*resourceGroup.Name, "aro-v4-e2e-rg-") {
+			return false
+		}
+
+		if _, ok := resourceGroup.Tags[doNotTouchTag]; ok {
+			return false
+		}
+
+		if resourceGroup.Tags["now"] == nil {
+			return false
+		}
+
+		now, err := time.Parse(time.RFC3339Nano, *resourceGroup.Tags["now"])
+		if err != nil {
+			log.Errorf("%s: %s", *resourceGroup.Name, err)
+			return false
+		}
+		if time.Now().Sub(now) < ttl*time.Hour {
+			return false
+		}
+
+		return true
+	}
+
+	rc := purge.NewResourceCleaner(log, subscriptionID, tenantID, authorizer, deleteCheck, dryRun)
+
+	resourcegroupscli := features.NewResourceGroupsClient(subscriptionID, authorizer)
+
+	// every resource have to live in the group, therefore deletion clean the unused groups at first
 	gs, err := resourcegroupscli.List(ctx, "", nil)
 	if err != nil {
 		return err
@@ -46,58 +104,18 @@ func run(ctx context.Context, log *logrus.Entry) error {
 
 	sort.Slice(gs, func(i, j int) bool { return *gs[i].Name < *gs[j].Name })
 	for _, g := range gs {
-		if !strings.HasPrefix(*g.Name, "v4-e2e-rg-") &&
-			!strings.HasPrefix(*g.Name, "aro-v4-e2e-rg-") {
-			continue
-		}
 
-		if g.Tags["now"] == nil {
-			continue
-		}
-
-		now, err := time.Parse(time.RFC3339Nano, *g.Tags["now"])
+		err := rc.CleanResourceGroup(ctx, g)
 		if err != nil {
-			log.Errorf("%s: %s", *g.Name, err)
-			continue
-		}
-		if time.Now().Sub(now) < 6*time.Hour {
-			continue
+			return err
 		}
 
-		vnets, err := vnetscli.List(ctx, *g.Name)
-		if err != nil {
-			log.Errorf("%s: %s", *g.Name, err)
-			continue
-		}
-		for _, vnet := range vnets {
-			var changed bool
-
-			for i := range *vnet.Subnets {
-				(*vnet.Subnets)[i].NetworkSecurityGroup = nil
-				changed = true
-			}
-
-			if changed {
-				log.Printf("updating vnet %s/%s", *g.Name, *vnet.Name)
-				vnetscli.CreateOrUpdate(ctx, *g.Name, *vnet.Name, vnet)
-			}
-		}
-
-		plss, err := privatelinkservicescli.List(ctx, *g.Name)
-		if err != nil {
-			log.Errorf("%s: %s", *g.Name, err)
-			continue
-		}
-		for _, pls := range plss {
-			for _, peconn := range *pls.PrivateEndpointConnections {
-				log.Printf("deleting private endpoint connection %s/%s/%s", *g.Name, *pls.Name, *peconn.Name)
-				privatelinkservicescli.DeletePrivateEndpointConnection(ctx, *g.Name, *pls.Name, *peconn.Name)
-			}
-		}
-
-		log.Printf("deleting resource group %s", *g.Name)
-		resourcegroupscli.Delete(ctx, *g.Name)
 	}
 
-	return nil
+	err = rc.CleanRoleAssignments(ctx)
+	if err != nil {
+		return err
+	}
+
+	return rc.CleanApps(ctx)
 }

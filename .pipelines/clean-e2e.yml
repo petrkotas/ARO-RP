@@ -25,6 +25,8 @@ jobs:
       export AZURE_CLIENT_SECRET=$(cat devops-spn.json | jq -r '.clientSecret')
       export AZURE_TENANT_ID=$(cat devops-spn.json | jq -r '.tenantId')
       export AZURE_SUBSCRIPTION_ID=$(e2e-subscription)
+      export ARO_MAX_TTL="6h"
+      export ARO_DONOTTOUCH_TAG="KEEPIT"
       rm devops-spn.json
 
       go run ./hack/cleane2e
