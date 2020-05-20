@@ -7,6 +7,8 @@ variables:
 extends:
   template: ./templates/template-clean-subscription.yml   
   parameters:
-    purgeTTL: '6h'
+    purgeTTL: '48h'
+    keepTag: 'DONOTTOUCH'
+    dryRun: true
     workingDirectory: ${{ variables.modulePath }}
-    subscriptionCredential: $(aro-v4-e2e-devops-spn)
+    subscriptionCredential: $(TBD)

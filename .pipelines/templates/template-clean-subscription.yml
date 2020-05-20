@@ -1,0 +1,50 @@
+parameters:
+  - name: purgeTTL
+    displayName: 'Timeout before resources are force cleaned.'
+    type: string
+    default: '6h' 
+  - name: keepTag
+    displayName: 'The tag signalling which resource groups to keep'
+    type: string
+    default: 'NOTOUCH'
+  - name: subscriptionCredentials
+    displayName: 'Subscription properties required to login'
+    type: string
+    default: ''
+  - name: workingDirectory
+    type: string
+    default: ''
+  - name: dryRun
+    displayName: 'Determine whether the actuall cleanup takes place or job just logs'
+    type: bool
+    default: false
+
+jobs:
+- job: Clean_E2E
+  pool:
+    vmImage: ubuntu-latest
+
+  steps:
+    - template: ./template-setup-golang-env.yml
+      parameters:
+        gobin: ${{ variables.GOBIN }}
+        gopath: ${{ variables.GOPATH }}
+        goroot: ${{ variables.GOROOT }}
+        modulePath: ${{ variables.modulePath }}
+
+    - script: |
+        set -e
+
+        echo ${{ parameters.subscriptionCredentials }} | base64 -d -w 0 > devops-spn.json
+        export AZURE_CLIENT_ID=$(cat devops-spn.json | jq -r '.clientId')
+        export AZURE_CLIENT_SECRET=$(cat devops-spn.json | jq -r '.clientSecret')
+        export AZURE_TENANT_ID=$(cat devops-spn.json | jq -r '.tenantId')
+        export AZURE_SUBSCRIPTION_ID=$(e2e-subscription)
+        export AZURE_PURGE_TTL="${{ parameters.purgeTTL }}"
+        export AZURE_KEEP_TAG="${{ parameters.keepTag }}"
+        export AZURE_PURGE_DRY_RUN="${{ parameters.dryRun }}"
+        rm devops-spn.json
+
+        go run ./hack/cleane2e
+      workingDirectory: ${{ parameters.workingDirectory }}
+      displayName: 🧹 Clean E2E subscription
