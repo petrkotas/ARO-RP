@@ -6,7 +6,6 @@ package main
 import (
 	"context"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -14,7 +13,6 @@ import (
 	"github.com/Azure/go-autorest/autorest/azure/auth"
 	"github.com/sirupsen/logrus"
 
-	"github.com/Azure/ARO-RP/pkg/util/azureclient/mgmt/features"
 	utillog "github.com/Azure/ARO-RP/pkg/util/log"
 
 	"github.com/Azure/ARO-RP/pkg/util/purge"
@@ -94,22 +92,9 @@ func run(ctx context.Context, log *logrus.Entry) error {
 
 	rc := purge.NewResourceCleaner(log, subscriptionID, tenantID, authorizer, deleteCheck, dryRun)
 
-	resourcegroupscli := features.NewResourceGroupsClient(subscriptionID, authorizer)
-
-	// every resource have to live in the group, therefore deletion clean the unused groups at first
-	gs, err := resourcegroupscli.List(ctx, "", nil)
+	err = rc.CleanResourceGroups(ctx)
 	if err != nil {
 		return err
-	}
-
-	sort.Slice(gs, func(i, j int) bool { return *gs[i].Name < *gs[j].Name })
-	for _, g := range gs {
-
-		err := rc.CleanResourceGroup(ctx, g)
-		if err != nil {
-			return err
-		}
-
 	}
 
 	err = rc.CleanRoleAssignments(ctx)
