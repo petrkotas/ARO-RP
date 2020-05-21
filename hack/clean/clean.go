@@ -5,8 +5,8 @@ package main
 
 import (
 	"context"
+	"flag"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -25,9 +25,13 @@ const (
 	defaultKeepTag = "KEEPIT"
 )
 
+var dryRun = flag.Bool("dryRun", false, "should the purge perform dry for test")
+
 func main() {
 	ctx := context.Background()
 	log := utillog.GetLogger()
+
+	flag.Parse()
 
 	if err := run(ctx, log); err != nil {
 		log.Fatal(err)
@@ -56,14 +60,6 @@ func run(ctx context.Context, log *logrus.Entry) error {
 		log.Fatal(err)
 	}
 
-	dryRun, err := strconv.ParseBool(os.Getenv("AZURE_PURGE_DRY_RUN"))
-	if err != nil {
-		log.Errorf("Cannot determine dryRun, defaulting to false: %s", err)
-	}
-	if dryRun {
-		log.Info("Dry run!")
-	}
-
 	deleteCheck := func(resourceGroup mgmtfeatures.ResourceGroup) bool {
 		if !strings.HasPrefix(*resourceGroup.Name, "v4-e2e-rg-") &&
 			!strings.HasPrefix(*resourceGroup.Name, "aro-v4-e2e-rg-") {
@@ -90,17 +86,17 @@ func run(ctx context.Context, log *logrus.Entry) error {
 		return true
 	}
 
-	rc := purge.NewResourceCleaner(log, subscriptionID, tenantID, authorizer, deleteCheck, dryRun)
+	rc := purge.NewResourceCleaner(log, subscriptionID, tenantID, authorizer, deleteCheck, *dryRun, "")
 
 	err = rc.CleanResourceGroups(ctx)
 	if err != nil {
 		return err
 	}
 
-	//err = rc.CleanRoleAssignments(ctx)
-	//if err != nil {
-	//	return err
-	//}
+	err = rc.CleanRoleAssignments(ctx)
+	if err != nil {
+		return err
+	}
 
 	//return rc.CleanApps(ctx)
 	return nil

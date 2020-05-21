@@ -33,6 +33,10 @@ type ResourceCleaner struct {
 	authorizer     autorest.Authorizer
 	dryRun         bool
 
+	resourcegroupscli      features.ResourceGroupsClient
+	vnetscli               network.VirtualNetworksClient
+	privatelinkservicescli network.PrivateLinkServicesClient
+
 	appWhiteList map[string]bool
 
 	deleteCheck checkFn
@@ -44,16 +48,20 @@ type ResourceCleaner struct {
 }
 
 // NewResourceCleaner instantiates the new RC object
-func NewResourceCleaner(Log *logrus.Entry, SubscriptionID string, TenantID string, Authorizer autorest.Authorizer, DeleteCheck checkFn, DryRun bool, keepTag string) ResourceCleaner {
+func NewResourceCleaner(log *logrus.Entry, subscriptionID string, tenantID string, authorizer autorest.Authorizer, deleteCheck checkFn, dryRun bool, keepTag string) ResourceCleaner {
 	return ResourceCleaner{
-		log:            Log,
-		authorizer:     Authorizer,
-		subscriptionID: SubscriptionID,
-		tenantID:       TenantID,
-		dryRun:         DryRun,
+		log:            log,
+		authorizer:     authorizer,
+		subscriptionID: subscriptionID,
+		tenantID:       tenantID,
+		dryRun:         dryRun,
+
+		resourcegroupscli:      features.NewResourceGroupsClient(subscriptionID, authorizer),
+		vnetscli:               network.NewVirtualNetworksClient(subscriptionID, authorizer),
+		privatelinkservicescli: network.NewPrivateLinkServicesClient(subscriptionID, authorizer),
 
 		// DeleteCheck decides whether the resource group gets deleted
-		deleteCheck: DeleteCheck,
+		deleteCheck: deleteCheck,
 		keepTag:     keepTag,
 	}
 }
@@ -62,10 +70,8 @@ func NewResourceCleaner(Log *logrus.Entry, SubscriptionID string, TenantID strin
 // and deleted everything that is not marked for deletion
 // The deletion check is performed by passed function: DeleteCheck
 func (rc *ResourceCleaner) CleanResourceGroups(ctx context.Context) error {
-	resourcegroupscli := features.NewResourceGroupsClient(rc.subscriptionID, rc.authorizer)
-
 	// every resource have to live in the group, therefore deletion clean the unused groups at first
-	gs, err := resourcegroupscli.List(ctx, "", nil)
+	gs, err := rc.resourcegroupscli.List(ctx, "", nil)
 	if err != nil {
 		return err
 	}
@@ -88,10 +94,8 @@ func (rc *ResourceCleaner) CleanResourceGroups(ctx context.Context) error {
 //     - checks ARO presence -> store app object ID for futher use
 //     - deletes resource group
 func (rc *ResourceCleaner) cleanResourceGroup(ctx context.Context, resourceGroup mgmtfeatures.ResourceGroup) error {
-	resourcegroupscli := features.NewResourceGroupsClient(rc.subscriptionID, rc.authorizer)
-
 	if rc.deleteCheck(resourceGroup) {
-		rc.log.Infof("deleting resource group %s", resourceGroup.Name)
+		rc.log.Infof("deleting resource group %s", *resourceGroup.Name)
 
 		err := rc.cleanNetworking(ctx, resourceGroup)
 		if err != nil {
@@ -110,12 +114,13 @@ func (rc *ResourceCleaner) cleanResourceGroup(ctx context.Context, resourceGroup
 		}
 
 		if !rc.dryRun {
-			_, err := resourcegroupscli.Delete(ctx, *resourceGroup.Name)
+			_, err := rc.resourcegroupscli.Delete(ctx, *resourceGroup.Name)
 			if err != nil {
-				rc.log.Errorf("Cannot delete resourceGroup: %s", resourceGroup.Name, err)
+				rc.log.Errorf("Cannot delete resourceGroup: %s. Error: %w", *resourceGroup.Name, err)
 				return err
 			}
 		}
+		rc.log.Infof("deleting: %s", *resourceGroup.Name)
 	}
 
 	return nil
@@ -123,11 +128,9 @@ func (rc *ResourceCleaner) cleanResourceGroup(ctx context.Context, resourceGroup
 
 // cleanNetworking lists subnets in vnets and unnassign security groups
 func (rc *ResourceCleaner) cleanNetworking(ctx context.Context, resourceGroup mgmtfeatures.ResourceGroup) error {
-	vnetscli := network.NewVirtualNetworksClient(rc.subscriptionID, rc.authorizer)
-
-	vnets, err := vnetscli.List(ctx, *resourceGroup.Name)
+	vnets, err := rc.vnetscli.List(ctx, *resourceGroup.Name)
 	if err != nil {
-		rc.log.Errorf("%s: %s", resourceGroup.Name, err)
+		rc.log.Errorf("%s: %s", *resourceGroup.Name, err)
 		return err
 	}
 
@@ -139,14 +142,17 @@ func (rc *ResourceCleaner) cleanNetworking(ctx context.Context, resourceGroup mg
 				(*vnet.Subnets)[i].NetworkSecurityGroup = nil
 				changed = true
 			} else {
-				rc.log.Infof("Removing NetworkSecurityGroup from vnet: %s, subnet: %s", vnet.Name, (*vnet.Subnets)[i].Name)
-				rc.log.Infof("updating vnet %s/%s", resourceGroup.Name, *vnet.Name)
+				rc.log.Infof("Removing NetworkSecurityGroup from vnet: %s, subnet: %s", *vnet.Name, *(*vnet.Subnets)[i].Name)
+				rc.log.Infof("updating vnet %s/%s", *resourceGroup.Name, *vnet.Name)
 			}
 		}
 
 		if changed {
-			rc.log.Printf("updating vnet %s/%s", resourceGroup.Name, *vnet.Name)
-			vnetscli.CreateOrUpdate(ctx, *resourceGroup.Name, *vnet.Name, vnet)
+			rc.log.Printf("updating vnet %s/%s", *resourceGroup.Name, *vnet.Name)
+			_, err := rc.vnetscli.CreateOrUpdate(ctx, *resourceGroup.Name, *vnet.Name, vnet)
+			if err != nil {
+				rc.log.Errorf(err.Error())
+			}
 		}
 	}
 
@@ -155,19 +161,18 @@ func (rc *ResourceCleaner) cleanNetworking(ctx context.Context, resourceGroup mg
 
 // cleanPrivateLink lists and unassigns all private links. If they are assigned the deletoin will fail
 func (rc *ResourceCleaner) cleanPrivateLink(ctx context.Context, resourceGroup mgmtfeatures.ResourceGroup) error {
-	privatelinkservicescli := network.NewPrivateLinkServicesClient(rc.subscriptionID, rc.authorizer)
-	plss, err := privatelinkservicescli.List(ctx, *resourceGroup.Name)
+	plss, err := rc.privatelinkservicescli.List(ctx, *resourceGroup.Name)
 	if err != nil {
-		rc.log.Errorf("%s: %s", resourceGroup.Name, err)
+		rc.log.Errorf("%s: %s", *resourceGroup.Name, err)
 		return err
 	}
 	for _, pls := range plss {
 		for _, peconn := range *pls.PrivateEndpointConnections {
-			rc.log.Infof("deleting private endpoint connection %s/%s/%s", resourceGroup.Name, *pls.Name, *peconn.Name)
+			rc.log.Infof("deleting private endpoint connection %s/%s/%s", *resourceGroup.Name, *pls.Name, *peconn.Name)
 			if !rc.dryRun {
-				_, err := privatelinkservicescli.DeletePrivateEndpointConnection(ctx, *resourceGroup.Name, *pls.Name, *peconn.Name)
+				_, err := rc.privatelinkservicescli.DeletePrivateEndpointConnection(ctx, *resourceGroup.Name, *pls.Name, *peconn.Name)
 				if err != nil {
-					rc.log.Errorf("Cannot delete privatelink: %s, %s", pls.Name, err)
+					rc.log.Errorf("Cannot delete privatelink: %s, %s", *pls.Name, err)
 					return err
 				}
 			}
@@ -189,7 +194,7 @@ func (rc *ResourceCleaner) checkAndMarkClientID(ctx context.Context, resourceGro
 	// list aro clusters if any and append existing app clientID to the delete list
 	aros, err := arocli.ListByResourceGroup(ctx, *resourceGroup.Name)
 	if err != nil {
-		rc.log.Errorf("%s: %s", resourceGroup.Name, err)
+		rc.log.Errorf("%s: %s", *resourceGroup.Name, err)
 		return err
 	}
 
@@ -222,22 +227,22 @@ func (rc *ResourceCleaner) CleanRoleAssignments(ctx context.Context) error {
 	for roleAssignments.NotDone() {
 		pageResult := roleAssignments.Values()
 
-		for _, roleAssignmentResult := range pageResult {
-			if !strings.HasPrefix(*roleAssignmentResult.Name, "aro-") {
+		for _, ra := range pageResult {
+			if !strings.HasPrefix(*ra.Name, "aro-") {
 				// if the name is not simmilar to the aro cluster pattern, skip
 				continue
 			}
 
-			_, ok := rc.keepClientIDs[*roleAssignmentResult.PrincipalID]
+			_, ok := rc.keepClientIDs[*ra.PrincipalID]
 			if !ok {
 				if !rc.dryRun {
-					_, err := roleassignmentcli.DeleteByID(ctx, *roleAssignmentResult.ID)
-					if err != nil {
-						rc.log.Errorf("Cannot delete roleAssignment %s: %s", *roleAssignmentResult.ID, err)
-						return err
-					}
+					//_, err := roleassignmentcli.DeleteByID(ctx, *ra.ID)
+					//if err != nil {
+					//	rc.log.Errorf("Cannot delete roleAssignment %s: %s", *ra.ID, err)
+					//	return err
+					//}
 				}
-				rc.log.Infof("Deleting role assignment: %s", roleAssignmentResult.Name)
+				rc.log.Infof("Deleting role assignment: %s", *ra.Name)
 			}
 		}
 
@@ -279,7 +284,7 @@ func (rc *ResourceCleaner) CleanApps(ctx context.Context) error {
 						return err
 					}
 				}
-				rc.log.Infof("Deleting app: %s", app.DisplayName)
+				rc.log.Infof("Deleting app: %s", *app.DisplayName)
 			}
 		}
 
