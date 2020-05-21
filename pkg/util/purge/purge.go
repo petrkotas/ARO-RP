@@ -17,7 +17,6 @@ import (
 	"github.com/Azure/ARO-RP/pkg/util/azureclient/mgmt/authorization"
 	"github.com/Azure/ARO-RP/pkg/util/azureclient/mgmt/features"
 	"github.com/Azure/ARO-RP/pkg/util/azureclient/mgmt/network"
-	"github.com/Azure/ARO-RP/pkg/util/azureclient/mgmt/redhatopenshift"
 
 	mgmtnetwork "github.com/Azure/azure-sdk-for-go/services/network/mgmt/2019-07-01/network"
 	mgmtfeatures "github.com/Azure/azure-sdk-for-go/services/resources/mgmt/2019-07-01/features"
@@ -36,6 +35,7 @@ type ResourceCleaner struct {
 	resourcegroupscli      features.ResourceGroupsClient
 	vnetscli               network.VirtualNetworksClient
 	privatelinkservicescli network.PrivateLinkServicesClient
+	roleassignmentcli      authorization.RoleAssignmentsClient
 
 	appWhiteList map[string]bool
 
@@ -59,6 +59,7 @@ func NewResourceCleaner(log *logrus.Entry, subscriptionID string, tenantID strin
 		resourcegroupscli:      features.NewResourceGroupsClient(subscriptionID, authorizer),
 		vnetscli:               network.NewVirtualNetworksClient(subscriptionID, authorizer),
 		privatelinkservicescli: network.NewPrivateLinkServicesClient(subscriptionID, authorizer),
+		roleassignmentcli:      authorization.NewRoleAssignmentsClient(subscriptionID, authorizer),
 
 		// DeleteCheck decides whether the resource group gets deleted
 		deleteCheck: deleteCheck,
@@ -78,7 +79,6 @@ func (rc *ResourceCleaner) CleanResourceGroups(ctx context.Context) error {
 
 	sort.Slice(gs, func(i, j int) bool { return *gs[i].Name < *gs[j].Name })
 	for _, g := range gs {
-
 		err := rc.cleanResourceGroup(ctx, g)
 		if err != nil {
 			return err
@@ -105,11 +105,6 @@ func (rc *ResourceCleaner) cleanResourceGroup(ctx context.Context, resourceGroup
 		err = rc.cleanPrivateLink(ctx, resourceGroup)
 		if err != nil {
 			rc.log.Errorf("Cannot clean privatelinks: %s", err)
-			return err
-		}
-		err = rc.checkAndMarkClientID(ctx, resourceGroup)
-		if err != nil {
-			rc.log.Errorf("Cannot check for aro cluster: %s", err)
 			return err
 		}
 
@@ -182,42 +177,10 @@ func (rc *ResourceCleaner) cleanPrivateLink(ctx context.Context, resourceGroup m
 	return nil
 }
 
-// CheckAndMarkClientID scans whether the resource group has ARO cluster
-// if so, store the attached clientID to enable deletion of
-//     - roleAssignment
-//     - app registration
-// if the cluster is not for deletion, it is flagged to keep.
-// Deciding which app and role assignments can be deleted is only possible through linking to the existing cluster.
-func (rc *ResourceCleaner) checkAndMarkClientID(ctx context.Context, resourceGroup mgmtfeatures.ResourceGroup) error {
-	arocli := redhatopenshift.NewOpenShiftClustersClient(rc.subscriptionID, rc.authorizer)
-
-	// list aro clusters if any and append existing app clientID to the delete list
-	aros, err := arocli.ListByResourceGroup(ctx, *resourceGroup.Name)
-	if err != nil {
-		rc.log.Errorf("%s: %s", *resourceGroup.Name, err)
-		return err
-	}
-
-	// if there is ARO in the resource group, store the app clientID for later cleanup
-	for _, aro := range aros {
-		clientID := aro.ServicePrincipalProfile.ClientID
-
-		if !rc.deleteCheck(resourceGroup) {
-			if _, ok := rc.keepClientIDs[*clientID]; !ok {
-				rc.keepClientIDs[*clientID] = true
-			}
-		}
-	}
-
-	return nil
-}
-
 // CleanRoleAssignments lists role assignments from the subscription with name matching the pattern of aro-*
 // and deletes everything that is not assigned to the cluster
 func (rc *ResourceCleaner) CleanRoleAssignments(ctx context.Context) error {
-	roleassignmentcli := authorization.NewRoleAssignmentsClient(rc.subscriptionID, rc.authorizer)
-
-	roleAssignments, err := roleassignmentcli.List(ctx, "")
+	roleAssignments, err := rc.roleassignmentcli.List(ctx, "")
 	if err != nil {
 		rc.log.Errorf("Getting roleAssignments: %s", err)
 		return err
@@ -225,13 +188,18 @@ func (rc *ResourceCleaner) CleanRoleAssignments(ctx context.Context) error {
 
 	// iterate over all roleAssignments and delete everything not assiciated with keep cluster
 	for roleAssignments.NotDone() {
-		pageResult := roleAssignments.Values()
+		pageResults := roleAssignments.Values()
 
-		for _, ra := range pageResult {
+		for _, ra := range pageResults {
+			// TODO: Need to check RA is on v4-{region} resourceGroup.
+			// and dev-vnet
 			if !strings.HasPrefix(*ra.Name, "aro-") {
 				// if the name is not simmilar to the aro cluster pattern, skip
 				continue
 			}
+
+			// Rolebindig SP ID corresponds to AAP/SP with name aro-{stuff}
+			// The issue is that aro-{stuff} is not coresponding
 
 			_, ok := rc.keepClientIDs[*ra.PrincipalID]
 			if !ok {

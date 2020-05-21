@@ -93,6 +93,24 @@ func run(ctx context.Context, log *logrus.Entry) error {
 		return err
 	}
 
+	err = rc.CleanAAD(ctx){
+
+	// 1. Create a list used ClientID from all CDB instances:
+	// RG = {v4-eastus, v4-westeurope,v4-australiasouteast}
+	// CDB - {RG same names}
+	// In each CDB - List all collections.
+	// In each collections/OpenShiftClusters table list all documents
+	// and get openshiftCluster.Properties.servicePrincipalProfile.ClientID - this i TOKEEP list
+
+	// same RG list all RoleBinding on resource 'dev-vnet'.
+	// Each Rolebinding will have
+	// RoleAssignmentPropertiesWithScope.PrincipalID: "efd31202-b748-422f-801b-xxxxxxxxx",
+
+	// Get Application where ID = PrinciplalID.
+	// If name matches ^aro-[a-z0-9]{8}$ and not In TOKEEP - delete.
+
+	// Create ToDelete list and cycle and delete.
+
 	err = rc.CleanRoleAssignments(ctx)
 	if err != nil {
 		return err
