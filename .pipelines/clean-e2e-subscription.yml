@@ -5,8 +5,11 @@ variables:
 - template: vars.yml
 
 extends:
-  template: ./templates/template-clean-subscription.yml   
+  template: ./templates/template-clean-subscription.yml
   parameters:
     purgeTTL: '6h'
+    keepTag: 'DONOTTOUCH'
+    dryRun: true
     workingDirectory: ${{ variables.modulePath }}
     subscriptionCredential: $(aro-v4-e2e-devops-spn)
+    subscriptionId: $(e2e-subscription)

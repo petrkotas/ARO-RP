@@ -2,13 +2,17 @@ parameters:
   - name: purgeTTL
     displayName: 'Timeout before resources are force cleaned.'
     type: string
-    default: '6h' 
+    default: '6h'
   - name: keepTag
     displayName: 'The tag signalling which resource groups to keep'
     type: string
     default: 'NOTOUCH'
   - name: subscriptionCredentials
     displayName: 'Subscription properties required to login'
+    type: string
+    default: ''
+  - name: subscriptionId
+    displayName: 'SubscriptionId to clean'
     type: string
     default: ''
   - name: workingDirectory
@@ -35,16 +39,16 @@ jobs:
     - script: |
         set -e
 
-        echo ${{ parameters.subscriptionCredentials }} | base64 -d -w 0 > devops-spn.json
-        export AZURE_CLIENT_ID=$(cat devops-spn.json | jq -r '.clientId')
-        export AZURE_CLIENT_SECRET=$(cat devops-spn.json | jq -r '.clientSecret')
-        export AZURE_TENANT_ID=$(cat devops-spn.json | jq -r '.tenantId')
-        export AZURE_SUBSCRIPTION_ID=$(e2e-subscription)
+        echo ${{ parameters.subscriptionCredentials }} | base64 -d -w 0 > spn.json
+        export AZURE_CLIENT_ID=$(cat spn.json | jq -r '.clientId')
+        export AZURE_CLIENT_SECRET=$(cat spn.json | jq -r '.clientSecret')
+        export AZURE_TENANT_ID=$(cat spn.json | jq -r '.tenantId')
+        export AZURE_SUBSCRIPTION_ID=$(parameters.subscriptionId)
         export AZURE_PURGE_TTL="${{ parameters.purgeTTL }}"
         export AZURE_KEEP_TAG="${{ parameters.keepTag }}"
         export AZURE_PURGE_DRY_RUN="${{ parameters.dryRun }}"
         rm devops-spn.json
 
-        go run ./hack/cleane2e
+        go run ./hack/clean
       workingDirectory: ${{ parameters.workingDirectory }}
       displayName: 🧹 Clean E2E subscription

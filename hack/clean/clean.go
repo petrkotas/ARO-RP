@@ -97,10 +97,11 @@ func run(ctx context.Context, log *logrus.Entry) error {
 		return err
 	}
 
-	err = rc.CleanRoleAssignments(ctx)
-	if err != nil {
-		return err
-	}
+	//err = rc.CleanRoleAssignments(ctx)
+	//if err != nil {
+	//	return err
+	//}
 
-	return rc.CleanApps(ctx)
+	//return rc.CleanApps(ctx)
+	return nil
 }

@@ -5,10 +5,11 @@ variables:
 - template: vars.yml
 
 extends:
-  template: ./templates/template-clean-subscription.yml   
+  template: ./templates/template-clean-subscription.yml
   parameters:
     purgeTTL: '48h'
     keepTag: 'DONOTTOUCH'
     dryRun: true
     workingDirectory: ${{ variables.modulePath }}
-    subscriptionCredential: $(TBD)
+    subscriptionCredential: $(aro-rhdev-purge)
+    subscriptionId: $(rh-subscription)
