@@ -10,22 +10,22 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Azure/go-autorest/autorest/azure/auth"
+	mgmtfeatures "github.com/Azure/azure-sdk-for-go/services/resources/mgmt/2019-07-01/features"
 	"github.com/sirupsen/logrus"
 
 	utillog "github.com/Azure/ARO-RP/pkg/util/log"
-
 	"github.com/Azure/ARO-RP/pkg/util/purge"
+)
 
-	mgmtfeatures "github.com/Azure/azure-sdk-for-go/services/resources/mgmt/2019-07-01/features"
+var (
+	dryRun = flag.Bool("dryRun", true, `Dry run`)
 )
 
 const (
-	defaultTTL     = 48
-	defaultKeepTag = "KEEPIT"
+	defaultTTL          = 48
+	defaultCreatedAtTag = "createdAt"
+	defaultKeepTag      = "persist"
 )
-
-var dryRun = flag.Bool("dryRun", false, "should the purge perform dry for test")
 
 func main() {
 	ctx := context.Background()
@@ -39,83 +39,71 @@ func main() {
 }
 
 func run(ctx context.Context, log *logrus.Entry) error {
-
-	subscriptionID := os.Getenv("AZURE_SUBSCRIPTION_ID")
-	tenantID := os.Getenv("AZURE_TENANT_ID")
-
-	ttl, err := time.ParseDuration(os.Getenv("AZURE_PURGE_TTL"))
-	if err != nil {
-		// in case of error the default ttl is always 48 hours
-		ttl = defaultTTL * time.Hour
-		log.Errorf("Cannot convert TTL to int: %s", err)
+	var ttl time.Duration
+	if os.Getenv("AZURE_PURGE_TTL") != "" {
+		var err error
+		ttl, err = time.ParseDuration(os.Getenv("AZURE_PURGE_TTL"))
+		if err != nil {
+			return err
+		}
+	} else {
+		ttl = defaultTTL
 	}
 
-	doNotTouchTag := os.Getenv("AZURE_KEEP_TAG")
-	if doNotTouchTag == "" {
-		doNotTouchTag = defaultKeepTag
+	var createdTag = defaultCreatedAtTag
+	if os.Getenv("AZURE_PURGE_CREATED_TAG") != "" {
+		createdTag = os.Getenv("AZURE_PURGE_CREATED_TAG")
 	}
 
-	authorizer, err := auth.NewAuthorizerFromEnvironment()
-	if err != nil {
-		log.Fatal(err)
+	deleteGroupPrefixes := []string{}
+	if os.Getenv("AZURE_PURGE_RG_DEL_PREFIX") != "" {
+		deleteGroupPrefixes = strings.Split(os.Getenv("AZURE_PURGE_RG_DEL_PREFIX"), ",")
 	}
 
-	deleteCheck := func(resourceGroup mgmtfeatures.ResourceGroup) bool {
-		if !strings.HasPrefix(*resourceGroup.Name, "v4-e2e-rg-") &&
-			!strings.HasPrefix(*resourceGroup.Name, "aro-v4-e2e-rg-") {
+	shouldDelete := func(resourceGroup mgmtfeatures.ResourceGroup, log *logrus.Entry) bool {
+		isDeleteGroup := false
+		for _, deleteGroupPrefix := range deleteGroupPrefixes {
+			if strings.HasPrefix(*resourceGroup.Name, deleteGroupPrefix) {
+				isDeleteGroup = true
+				break
+			}
+		}
+		if isDeleteGroup {
 			return false
 		}
 
-		if _, ok := resourceGroup.Tags[doNotTouchTag]; ok {
+		for t := range resourceGroup.Tags {
+			if strings.ToLower(t) == defaultKeepTag {
+				log.Debugf("Group %s is to persist. SKIP.", *resourceGroup.Name)
+				return false
+			}
+		}
+
+		// azure tags is not consistent with lower/upper cases.
+		if _, ok := resourceGroup.Tags[createdTag]; !ok {
+			log.Debugf("Group %s does not have createdAt tag. SKIP.", *resourceGroup.Name)
 			return false
 		}
 
-		if resourceGroup.Tags["now"] == nil {
-			return false
-		}
-
-		now, err := time.Parse(time.RFC3339Nano, *resourceGroup.Tags["now"])
+		createdAt, err := time.Parse(time.RFC3339Nano, *resourceGroup.Tags[createdTag])
 		if err != nil {
 			log.Errorf("%s: %s", *resourceGroup.Name, err)
 			return false
 		}
-		if time.Now().Sub(now) < ttl*time.Hour {
+		if time.Now().Sub(createdAt) < ttl {
+			log.Debugf("Group %s is still less than TTL. SKIP.", *resourceGroup.Name)
 			return false
 		}
 
 		return true
 	}
 
-	rc := purge.NewResourceCleaner(log, subscriptionID, tenantID, authorizer, deleteCheck, *dryRun, "")
+	log.Infof("Starting the resource cleaner, DryRun: %t", *dryRun)
 
-	err = rc.CleanResourceGroups(ctx)
+	rc, err := purge.NewResourceCleaner(log, shouldDelete, *dryRun)
 	if err != nil {
 		return err
 	}
 
-	err = rc.CleanAAD(ctx){
-
-	// 1. Create a list used ClientID from all CDB instances:
-	// RG = {v4-eastus, v4-westeurope,v4-australiasouteast}
-	// CDB - {RG same names}
-	// In each CDB - List all collections.
-	// In each collections/OpenShiftClusters table list all documents
-	// and get openshiftCluster.Properties.servicePrincipalProfile.ClientID - this i TOKEEP list
-
-	// same RG list all RoleBinding on resource 'dev-vnet'.
-	// Each Rolebinding will have
-	// RoleAssignmentPropertiesWithScope.PrincipalID: "efd31202-b748-422f-801b-xxxxxxxxx",
-
-	// Get Application where ID = PrinciplalID.
-	// If name matches ^aro-[a-z0-9]{8}$ and not In TOKEEP - delete.
-
-	// Create ToDelete list and cycle and delete.
-
-	err = rc.CleanRoleAssignments(ctx)
-	if err != nil {
-		return err
-	}
-
-	//return rc.CleanApps(ctx)
-	return nil
+	return rc.CleanResourceGroups(ctx)
 }

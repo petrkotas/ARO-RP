@@ -13,9 +13,6 @@ import (
 // RoleAssignmentsClient is a minimal interface for azure RoleAssignmentsClient
 type RoleAssignmentsClient interface {
 	Create(ctx context.Context, scope string, roleAssignmentName string, parameters mgmtauthorization.RoleAssignmentCreateParameters) (result mgmtauthorization.RoleAssignment, err error)
-	Delete(ctx context.Context, scope string, roleAssignmentName string) (result mgmtauthorization.RoleAssignment, err error)
-	DeleteByID(ctx context.Context, roleID string) (result mgmtauthorization.RoleAssignment, err error)
-	List(ctx context.Context, filter string) (result mgmtauthorization.RoleAssignmentListResultPage, err error)
 }
 
 type roleAssignmentsClient struct {

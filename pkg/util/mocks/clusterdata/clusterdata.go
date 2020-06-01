@@ -6,11 +6,9 @@ package mock_clusterdata
 
 import (
 	context "context"
-	reflect "reflect"
-
-	gomock "github.com/golang/mock/gomock"
-
 	api "github.com/Azure/ARO-RP/pkg/api"
+	gomock "github.com/golang/mock/gomock"
+	reflect "reflect"
 )
 
 // MockOpenShiftClusterEnricher is a mock of OpenShiftClusterEnricher interface
