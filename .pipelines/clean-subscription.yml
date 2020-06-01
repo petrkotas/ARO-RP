@@ -1,0 +1,14 @@
+trigger: none
+pr: none
+
+variables:
+- template: vars.yml
+
+extends:
+  template: ./templates/template-clean-subscription.yml
+  parameters:
+    purgeTTL: '$(purgeTtl)'
+    dryRun: $(dryRun)
+    workingDirectory: ${{ variables.modulePath }}
+    subscriptionCredential: $(aro-rhdev-purge)
+    subscriptionId: $(subscriptionID)
