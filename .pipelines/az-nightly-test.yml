@@ -1,0 +1,46 @@
+schedules:
+  - cron: "0 0 * * *"
+    displayName: Daily az nightly test
+    branches:
+      include:
+        - master
+    always: true
+
+variables:
+  resourcegroup: az-nightly
+  cluster: az-nightly-cluster
+  location: eastus
+
+steps:
+  - script: |
+      set -e
+      python3 -m venv env
+      . env/bin/activate
+      pip3 install --upgrade --pre azure-cli --extra-index-url https://azurecliprod.blob.core.windows.net/edge --no-cache-dir --upgrade-strategy=eager
+  - template: ./templates/template-az-cli-login.yml
+    parameters:
+      azureDevOpsJSONSPN: $(aro-v4-e2e-devops-spn)
+  - script: |
+      set -ex
+      az group create --name $(variables.resourcegroup) --location $(variables.location)
+      az network vnet create --resource-group $(variables.resourcegroup) --name aro-vnet --address-prefixes 10.0.0.0/22
+      az network vnet subnet create --resource-group $(variables.resourcegroup) --vnet-name aro-vnet --name master-subnet --address-prefixes 10.0.0.0/23 --service-endpoints Microsoft.ContainerRegistry
+      az network vnet subnet create --resource-group $(variables.resourcegroup) --vnet-name aro-vnet --name worker-subnet --address-prefixes 10.0.0.0/23 --service-endpoints Microsoft.ContainerRegistry
+      az network vnet subnet update --name worker-subnet --resource-group $(variables.resourcegroup) --vnet-name aro-vnet --disable-private-link-service-network-policies true
+  - script: |
+      set -ex
+      az aro create --resource-group $(variables.resourcegroup) --name $(variables.cluster) --vnet aro-vnet --master-subnet master-subnet --worker-subnet worker-subnet | jq -e '.provisioningState == "Succeeded"'
+  - script: |
+      set -ex
+      az aro list | jq -e '[ .[] | .name == "aro-v4-shared" ] | any'
+  - script: |
+      set -ex
+      az aro show --name $(variables.cluster) --resource-group $(variables.resourcegroup) | jq -e '.name == "aro-v4-shared"'
+  - script: |
+      set -ex
+      az aro delete --resource-group $(variables.resourcegroup) --name $(variables.cluster) -y
+      az group delete --name $(variables.resourcegroup) -y
+  - script: |
+      set -ex
+      deactivate
+      rm -rf env
